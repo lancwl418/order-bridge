@@ -1,2 +1,15 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+dist/
+build/
+
+# Env & secrets
 .env
 .env.*.local
+
+# OS/Editor
+.DS_Store
+.idea/
+.vscode/

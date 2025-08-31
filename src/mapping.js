@@ -1,8 +1,18 @@
-// Shopify 订单 → RIIN placeOrder payload（含图片名合法化 & 可选占位图）
+// Shopify 订单 → RIIN placeOrder payload
+// 约定：type=1(打印图) 来自 design_png（PNG），必要时走 /img/pngdpi 注入 DPI；type=2(效果图) 来自 image_url 或行属性上的 JPG
+
 const { getDesigns } = require("./podPlugin");
 
 const ALLOW_FALLBACK_IMAGE =
   (process.env.RIIN_ALLOW_FALLBACK_IMAGE || "false").toLowerCase() === "true";
+
+const FORCE_PNG_DPI =
+  (process.env.RIIN_FORCE_PNG_DPI || "0").toLowerCase() !== "0";
+const PRINT_DPI = Number(process.env.RIIN_PRINT_DPI || 300);
+const IMAGE_PROXY_BASE = String(process.env.IMAGE_PROXY_BASE || "").replace(
+  /\/+$/,
+  ""
+);
 
 // 允许：数字/字母/下划线/中文/英文中括号
 function sanitizeImageName(s) {
@@ -13,11 +23,9 @@ function sanitizeImageName(s) {
     .slice(0, 60);
 }
 
-// 统一规范化键名：小写、去空白和非字母数字下划线
 function normKey(s) {
   return String(s || "").toLowerCase().trim().replace(/[^a-z0-9_]+/g, "");
 }
-
 function getProp(line, keys) {
   const kv = {};
   (line.properties || []).forEach((p) => {
@@ -28,6 +36,10 @@ function getProp(line, keys) {
     if (v) return v;
   }
   return "";
+}
+
+function firstHttp(u) {
+  return typeof u === "string" && /^https?:\/\//i.test(u) ? u : "";
 }
 
 function deriveColorSize(line) {
@@ -41,61 +53,165 @@ function deriveColorSize(line) {
   return { color: color || "NA", size: size || "ONE" };
 }
 
-function firstHttp(url) {
-  return typeof url === "string" && /^https?:\/\//i.test(url) ? url : "";
+function withPngDpiProxy(url) {
+  if (!url) return "";
+  if (!FORCE_PNG_DPI) return url;
+  // 仅对 PNG 处理
+  if (!/\.png(\?|#|$)/i.test(url)) return url;
+  if (!IMAGE_PROXY_BASE) return url;
+  const src = encodeURIComponent(url);
+  return `${IMAGE_PROXY_BASE}/img/pngdpi?src=${src}&dpi=${PRINT_DPI}`;
 }
 
-// 取某一行的图片列表；先走 Qstomizer（或其它 POD 插件），不成就用 properties 兜底
+// 取某一行的图片列表；先走插件（Qstomizer），不成就用 properties 兜底
 async function buildImageList(order, line) {
   const orderId = String(order.id);
   const lineKey = String(line.id || line.variant_id || line.product_id || "1");
 
-  // 1) 优先插件（Qstomizer）：会返回 { front:{url}, back:{url} }
-  const plugin = await getDesigns(order, line);
+  const pushUniq = (arr, obj) => {
+    if (!obj?.imageUrl) return;
+    if (arr.some((x) => x.imageUrl === obj.imageUrl && x.type === obj.type)) return;
+    arr.push(obj);
+  };
 
   const list = [];
-  if (plugin?.front?.url) {
-    const name = sanitizeImageName(`P_${orderId}_${lineKey}_F`);
-    list.push({ type: 1, imageUrl: plugin.front.url, imageCode: name, imageName: name });
-  }
-  if (plugin?.back?.url && plugin.back.url !== plugin?.front?.url) {
-    const name = sanitizeImageName(`P_${orderId}_${lineKey}_B`);
-    list.push({ type: 1, imageUrl: plugin.back.url, imageCode: name, imageName: name });
-  }
 
-  // 2) 插件没拿到则回退到行属性
-  if (list.length === 0) {
-    const firstHttp = (u) => (typeof u === "string" && /^https?:\/\//i.test(u) ? u : "");
-    const frontUrl =
-      firstHttp(getProp(line, [
-        "_customimagefront", "custom image:", "customimage",
-        "design_url", "print_png_url", "print_url", "artwork_url", "image", "print"
-      ])) || "";
-    const backUrl =
-      firstHttp(getProp(line, ["_customimageback", "back_image", "image_back"])) || "";
-
-    if (frontUrl) {
-      const name = sanitizeImageName(`P_${orderId}_${lineKey}_F`);
-      list.push({ type: 1, imageUrl: frontUrl, imageCode: name, imageName: name });
+  // 1) 插件：分别取 print/mock 生成 type=1/2
+  const plugin = await getDesigns(order, line);
+  if (plugin?.front || plugin?.back) {
+    if (plugin.front?.print) {
+      const name = sanitizeImageName(`P_${orderId}_${lineKey}_P0`);
+      pushUniq(list, {
+        type: 1,
+        imageUrl: withPngDpiProxy(plugin.front.print),
+        imageCode: name,
+        imageName: name,
+      });
     }
-    if (backUrl && backUrl !== frontUrl) {
-      const name = sanitizeImageName(`P_${orderId}_${lineKey}_B`);
-      list.push({ type: 1, imageUrl: backUrl, imageCode: name, imageName: name });
+    if (plugin.back?.print && plugin.back.print !== plugin.front?.print) {
+      const name = sanitizeImageName(`P_${orderId}_${lineKey}_P1`);
+      pushUniq(list, {
+        type: 1,
+        imageUrl: withPngDpiProxy(plugin.back.print),
+        imageCode: name,
+        imageName: name,
+      });
     }
+    if (plugin.front?.mock && plugin.front.mock !== plugin.front?.print) {
+      const name = sanitizeImageName(`P_${orderId}_${lineKey}_M0`);
+      pushUniq(list, {
+        type: 2,
+        imageUrl: plugin.front.mock,
+        imageCode: name,
+        imageName: name,
+      });
+    }
+    if (
+      plugin.back?.mock &&
+      plugin.back.mock !== plugin.back?.print &&
+      plugin.back.mock !== plugin.front?.mock
+    ) {
+      const name = sanitizeImageName(`P_${orderId}_${lineKey}_M1`);
+      pushUniq(list, {
+        type: 2,
+        imageUrl: plugin.back.mock,
+        imageCode: name,
+        imageName: name,
+      });
+    }
+  }
 
-    // 3) 最终兜底（可选）
-    if (list.length === 0 && ALLOW_FALLBACK_IMAGE) {
-      const fb = firstHttp(line?.image_src || line?.image?.src) || "";
-      if (fb) {
-        const name = sanitizeImageName(`P_${orderId}_${lineKey}`);
-        list.push({ type: 1, imageUrl: fb, imageCode: name, imageName: name });
-      }
+  // 2) 插件没拿到打印图时，从行属性补齐
+  if (!list.some((x) => x.type === 1)) {
+    const fp =
+      firstHttp(
+        getProp(line, [
+          "print_png_url",
+          "design_png",
+          "design_url",
+          "print_url",
+        ])
+      ) || "";
+    const bp =
+      firstHttp(
+        getProp(line, [
+          "back_print_png_url",
+          "back_design_png",
+          "back_design_url",
+          "back_print_url",
+        ])
+      ) || "";
+    if (fp) {
+      const name = sanitizeImageName(`P_${orderId}_${lineKey}_P0`);
+      pushUniq(list, {
+        type: 1,
+        imageUrl: withPngDpiProxy(fp),
+        imageCode: name,
+        imageName: name,
+      });
+    }
+    if (bp && bp !== fp) {
+      const name = sanitizeImageName(`P_${orderId}_${lineKey}_P1`);
+      pushUniq(list, {
+        type: 1,
+        imageUrl: withPngDpiProxy(bp),
+        imageCode: name,
+        imageName: name,
+      });
+    }
+  }
+
+  // 3) 补效果图（若还没有）
+  if (!list.some((x) => x.type === 2)) {
+    const fm =
+      firstHttp(
+        getProp(line, [
+          "_customimagefront",
+          "custom image:",
+          "customimage",
+          "artwork_url",
+          "image",
+          "print",
+          "mockup_url",
+          "preview",
+          "mockup",
+        ])
+      ) || "";
+    const bm =
+      firstHttp(
+        getProp(line, ["_customimageback", "back_image", "image_back"])
+      ) || "";
+    if (fm) {
+      const name = sanitizeImageName(`P_${orderId}_${lineKey}_M0`);
+      pushUniq(list, {
+        type: 2,
+        imageUrl: fm,
+        imageCode: name,
+        imageName: name,
+      });
+    }
+    if (bm && bm !== fm) {
+      const name = sanitizeImageName(`P_${orderId}_${lineKey}_M1`);
+      pushUniq(list, {
+        type: 2,
+        imageUrl: bm,
+        imageCode: name,
+        imageName: name,
+      });
+    }
+  }
+
+  // 4) 最终兜底（可选，用商品主图）
+  if (list.length === 0 && ALLOW_FALLBACK_IMAGE) {
+    const fb = firstHttp(line?.image_src || line?.image?.src) || "";
+    if (fb) {
+      const name = sanitizeImageName(`P_${orderId}_${lineKey}_M0`);
+      pushUniq(list, { type: 2, imageUrl: fb, imageCode: name, imageName: name });
     }
   }
 
   return list;
 }
-
 
 function toDateTime(s) {
   if (!s) return "";
@@ -113,7 +229,7 @@ exports.mapOrderToRiin = async function mapOrderToRiin(order) {
 
   const goodsList = await Promise.all(
     (order.line_items || []).map(async (line, idx) => {
-      const { color, size } = deriveColorSize(line); // 你已有的解析函数
+      const { color, size } = deriveColorSize(line);
       const imageList = await buildImageList(order, line);
 
       const craftProp = getProp(line, ["craft", "craftType", "工艺"]);
@@ -131,7 +247,7 @@ exports.mapOrderToRiin = async function mapOrderToRiin(order) {
         sizeName: size,
         colorCode: String(color).toUpperCase(),
         colorName: color,
-        styleCode: String(line.product_id || line.sku || "STYLE"),
+        styleCode: String(line.sku || line.product_id || "STYLE"),
         styleName: line.title || "Style",
         craftType,
         num: line.quantity || 1,
@@ -155,7 +271,7 @@ exports.mapOrderToRiin = async function mapOrderToRiin(order) {
     platformOid: orderId,
 
     consigneeName: `${ship.first_name || ""} ${ship.last_name || ""}`.trim(),
-    phone: ship.phone || "0000000000",  // 你若用了 pickOrderPhone，可替换为 pickOrderPhone(order)
+    phone: ship.phone || "0000000000",
     address,
     receiverCountry: ship.country || ship.country_code || "",
     receiverProvince: ship.province || "",
