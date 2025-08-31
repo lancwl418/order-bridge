@@ -7,11 +7,14 @@
     "dev": "nodemon src/index.js",
     "start": "node src/index.js"
   },
+  "engines": { "node": ">=18" },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@shopify/shopify-api": "^11.14.1",
+    "cors": "^2.8.5",
     "crypto-js": "^4.2.0",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",

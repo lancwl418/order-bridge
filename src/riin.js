@@ -1,10 +1,11 @@
-// src/riin.js
+ // src/riin.js
+// RIIN API 封装：签名、节流、错误统一处理 + 常用接口
 const CryptoJS = require("crypto-js");
 
-const BASE = process.env.RIIN_BASE_URL;     // 测试: https://tshirt-test.riin.com  生产: https://tshirt.riin.com
-const SECRET = process.env.RIIN_SECRET_KEY;
+const BASE = (process.env.RIIN_BASE_URL || "").trim(); // 例： https://tshirt.riin.com / https://tshirt-test.riin.com
+const SECRET = (process.env.RIIN_SECRET_KEY || process.env.RIIN_SECRET || "").trim();
 
-// 轻量节流：同一时间不超过 10 个请求；间隔做个缓冲
+// --- 轻量节流：最多并发 10，调用间隔 ~120ms ---
 const queue = [];
 let active = 0;
 const MAX = 10;
@@ -14,7 +15,7 @@ const next = () => {
   const job = queue.shift();
   job().finally(() => {
     active--;
-    setTimeout(next, 120); // 约 ~8~10 QPS
+    setTimeout(next, 120);
   });
 };
 function runThrottled(fn) {
@@ -24,100 +25,111 @@ function runThrottled(fn) {
   });
 }
 
-const md5 = (s) => CryptoJS.MD5(s).toString(CryptoJS.enc.Hex);
+// --- 工具 ---
+const md5 = (s) => CryptoJS.MD5(String(s)).toString(CryptoJS.enc.Hex);
+const joinUrl = (base, path) => String(base).replace(/\/+$/, "") + "/" + String(path).replace(/^\/+/, "");
+
+// 统一抛错，带 message / traceId
+function throwRiinError(status, path, rawText, json) {
+  const msg = json?.message || json?.msg || json?.error_message || "";
+  const trace = json?.traceId || json?.traceID || "";
+  const bodyStr = rawText || (json ? JSON.stringify(json) : "");
+  const suffix = [msg && `message="${msg}"`, trace && `traceId=${trace}`].filter(Boolean).join(" ");
+  const detail = suffix ? `${suffix} | ${bodyStr}` : bodyStr;
+  throw new Error(`RIIN ${status} ${path}: ${detail}`);
+}
 
 async function post(path, payload) {
-  const body = JSON.stringify(payload);
-  const sign = md5(`${body}::${SECRET}`);
+  if (!BASE || !SECRET) throw new Error("RIIN_BASE_URL / RIIN_SECRET_KEY 未配置");
+  const url = joinUrl(BASE, path);
+  const body = JSON.stringify(payload || {});
+  const sign = md5(`${body}::${SECRET}`); // 按工厂要求：body + '::' + secret
+
   return runThrottled(async () => {
-    const res = await fetch(`${BASE}${path}`, {
+    const res = await fetch(url, {
       method: "POST",
       headers: {
-        "content-type": "application/json",
+        "content-type": "application/json;charset=utf-8",
+        // 注意：工厂要求两个 header 都带上
         secretKey: SECRET,
-        sign
+        sign,
       },
-      body
+      body,
     });
-    const data = await res.json().catch(() => ({}));
+
+    const text = await res.text().catch(() => "");
+    let json;
+    try { json = text ? JSON.parse(text) : undefined; } catch { json = undefined; }
+
+    // HTTP 层面错误
     if (!res.ok) {
-      throw new Error(`RIIN ${res.status} ${path}: ${JSON.stringify(data)}`);
+      throwRiinError(res.status, path, text, json);
     }
-    return data;
+    // 业务层面错误（很多接口即便 200 也会 successful=false）
+    if (json && json.successful === false) {
+      // 用 400 表示业务失败
+      throwRiinError(400, path, text, json);
+    }
+    return json ?? {};
   });
 }
 
-module.exports.riin = {
-  // 1) 下单
-  placeOrder: (order) => post("/trade/api/interface/placeOrder", order),
+/* ================== 对外 API ================== */
 
-  // 2) 修改订单/商品
+module.exports.riin = {
+  // 下单 / 推送 / 查询
+  placeOrder: (order) => post("/trade/api/interface/placeOrder", order),
+  pushOrder: (ids) => post("/trade/api/interface/pushOrder", { platformOidList: ids }),
+  queryOrderDelivery: (ids) => post("/trade/api/interface/queryOrderDelivery", { platformOidList: ids }),
+  queryOrderStatus: (ids) => post("/trade/api/interface/queryOrderStatus", { platformOidList: ids }),
+  queryOrderInfo: (ids) => post("/trade/api/interface/queryOrderInfo", { platformOidList: ids }),
+
+  // 修改（仅允许：收货信息 / 将状态改回待推送 / 商品数量规格颜色尺寸工艺 / 新增商品 / 标签&欧代URL）
   updateOrder: (order) => post("/trade/api/interface/updateOrder", order),
 
-  // 3) 预发货（不一定用得到）
+  // 修改订单图片（仅待推送或反审回电商）
+  updatePrintImage: (payload) => post("/trade/api/interface/updatePrintImage", payload),
+
+  // 关闭订单（兼容单个 / 列表）
+  closeOrder: (platformOidOrList) => {
+    if (Array.isArray(platformOidOrList)) {
+      return post("/trade/api/interface/closeOrder", { platformOidList: platformOidOrList });
+    }
+    return post("/trade/api/interface/closeOrder", { platformOid: platformOidOrList });
+  },
+
+  // 预发货（可选）
   preShipped: (order) => post("/trade/api/interface/preShipped", order),
 
-  // 4) 获取快递面单/运单
-  queryOrderDelivery: (ids) =>
-    post("/trade/api/interface/queryOrderDelivery", { platformOidList: ids }),
-
-  // 5) 查询订单状态
-  queryOrderStatus: (ids) =>
-    post("/trade/api/interface/queryOrderStatus", { platformOidList: ids }),
-
-  // 6~10) 基础资料（可选）
-  queryProduct: (page = { pageIndex: 1, pageSize: 1000 }) =>
-    post("/trade/api/interface/queryProduct", page),
-  queryStyle: (page = { pageIndex: 1, pageSize: 1000 }) =>
-    post("/trade/api/interface/queryStyle", page),
-  queryColor: (page = { pageIndex: 1, pageSize: 1000 }) =>
-    post("/trade/api/interface/queryColor", page),
-  querySize: (page = { pageIndex: 1, pageSize: 1000 }) =>
-    post("/trade/api/interface/querySize", page),
-  queryShipAddress: () =>
-    post("/trade/api/interface/queryShipAddress", {}),
-
-  // 11) 关闭订单
-  closeOrder: (platformOid) =>
-    post("/trade/api/interface/closeOrder", { platformOid }),
-
-  // 12) 根据产品编码查可用发货地址
+  // 基础资料（可选）
+  queryProduct: (page = { pageIndex: 1, pageSize: 1000 }) => post("/trade/api/interface/queryProduct", page),
+  queryStyle: (page = { pageIndex: 1, pageSize: 1000 }) => post("/trade/api/interface/queryStyle", page),
+  queryColor: (page = { pageIndex: 1, pageSize: 1000 }) => post("/trade/api/interface/queryColor", page),
+  querySize: (page = { pageIndex: 1, pageSize: 1000 }) => post("/trade/api/interface/querySize", page),
+  queryShipAddress: () => post("/trade/api/interface/queryShipAddress", {}),
   queryProductShipAddress: (productCodeList) =>
     post("/trade/api/interface/queryProductShipAddress", { productCodeList }),
 
-  // 13) 查询订单
-  queryOrderInfo: (ids) =>
-    post("/trade/api/interface/queryOrderInfo", { platformOidList: ids }),
+  // 异常图片（可选）
+  queryAbnormalImagePage: (params) => post("/trade/api/interface/queryAbnormalImagePage", params),
+  uploadAbnormalImage: (payload) => post("/trade/api/interface/uploadAbnormalImage", payload),
+  syncImageToFactory: (ids) => post("/trade/api/interface/syncImageToFactory", { ids }),
 
-  // 14) 修改订单图片
-  updatePrintImage: (payload) =>
-    post("/trade/api/interface/updatePrintImage", payload),
+  // 售后（可选）
+  queryAfterSalesInfo: (platformOid) => post("/trade/api/interface/queryAfterSalesInfo", { platformOid }),
+  createAfterSales: (payload) => post("/trade/api/interface/createAfterSales", payload),
 
-  // 15) 已发货订单地址脱敏
-  maskAddress: (payload) =>
-    post("/trade/api/interface/maskAddress", payload),
-
-  // 16) 推送订单（下单后必须推送才会流转）
-  pushOrder: (ids) =>
-    post("/trade/api/interface/pushOrder", { platformOidList: ids }),
-
-  // 17) 查询异常图片（可选）
-  queryAbnormalImagePage: (params) =>
-    post("/trade/api/interface/queryAbnormalImagePage", params),
-
-  // 18) 上传异常图片并置为“已处理待同步”
-  uploadAbnormalImage: (payload) =>
-    post("/trade/api/interface/uploadAbnormalImage", payload),
-
-  // 19) 同步异常图片处理到工厂
-  syncImageToFactory: (ids) =>
-    post("/trade/api/interface/syncImageToFactory", { ids }),
-
-  // 20) 查询订单售后详情
-  queryAfterSalesInfo: (platformOid) =>
-    post("/trade/api/interface/queryAfterSalesInfo", { platformOid }),
-
-  // 21) 申请售后
-  createAfterSales: (payload) =>
-    post("/trade/api/interface/createAfterSales", payload),
+  /* ====== helpers: 给后台用的状态解析/前置判断 ====== */
+  parseRiinStatusRow(row = {}) {
+    const code = Number(
+      row.factoryOrderStatusCode ?? row.factoryOrderStatus ?? row.status ?? row.statusCode ?? 0
+    );
+    const text = String(row.factoryOrderStatusDesc ?? row.statusDesc ?? row.status ?? row.desc ?? "");
+    return { code, text };
+  },
+  isModifiableStatus({ code, text }) {
+    if (/待推送|反审|回电商/i.test(text)) return true;
+    if ([1, 10].includes(code)) return true; // 经验值：工厂侧“未推送/可改”常见编码
+    return false;
+  },
 };

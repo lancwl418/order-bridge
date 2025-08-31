@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: order-bridge
+    env: node
+    plan: standard
+    branch: main
+    region: oregon
+    buildCommand: |
+      npm ci || npm i
+    startCommand: |
+      npm start
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SHOPIFY_API_KEY
+        sync: false
+      - key: SHOPIFY_API_SECRET
+        sync: false
+      - key: SHOP
+        sync: false           # 你的 <store>.myshopify.com
+      - key: ADMIN_API_ACCESS_TOKEN
+        sync: false           # 你当前用的 Admin 访问令牌
+      - key: SHOPIFY_API_VERSION
+        value: "2025-07"
+      - key: RIIN_BASE_URL
+        value: https://tshirt.riin.com
+      - key: RIIN_SECRET_KEY
+        sync: false
+      - key: QSTOMIZER_SHOP
+        sync: false
+      - key: QSTOMIZER_API_KEY
+        sync: false
+      - key: FACTORY_AUTO_PUSH
+        value: "true"
+      - key: RIIN_ALLOW_FALLBACK_IMAGE
+        value: "false"
+      - key: RIIN_FORCE_PNG_DPI
+        value: "300"
+      - key: IMAGE_PROXY_BASE
+        value: "https://bridge.ideamaxgroups.com"

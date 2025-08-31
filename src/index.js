@@ -1,4 +1,14 @@
 // src/index.js
+
+const cors = require('cors');
+const { verifyShopifyJWT } = require('./authShopifyJwt');
+
+app.use(cors({
+  origin: [/^https:\/\/.*\.myshopify\.com$/, /^https:\/\/admin\.shopify\.com$/],
+  methods: ['GET','POST','OPTIONS'],
+  allowedHeaders: ['Authorization','Content-Type'],
+}));
+
 require("dotenv").config();
 const express = require("express");
 const { shopifyRest, shopifyGql } = require("./shopify");
@@ -140,7 +150,7 @@ app.post(
 );
 
 /* -------- 轮询：已推送未履约 -> 查询面单 -> 创建履约 -------- */
-app.post("/api/tasks/poll", express.json(), async (req, res) => {
+app.post("/api/tasks/poll", verifyShopifyJWT, express.json(), async (req, res) => {
   try {
     const q =
       "tag:'factory:pushed' -tag:'factory:fulfilled' financial_status:paid";
@@ -202,23 +212,36 @@ app.post("/api/tasks/poll", express.json(), async (req, res) => {
 });
 
 /* --------------------- 手动批量推送 --------------------- */
-app.post("/api/tasks/push", express.json(), async (req, res) => {
+app.post("/api/tasks/push", verifyShopifyJWT, express.json(), async (req, res) => {
   try {
     let ids = [];
-    const raw = (req.query.ids || req.body.ids || "").trim();
-    if (raw) {
-      ids = raw.split(",").map((s) => s.trim()).filter(Boolean);
-    } else {
+
+    // 兼容：单笔 ?orderId=gid 或数字ID
+    const one = (req.query.orderId || req.body.orderId || '').toString();
+    if (one) {
+      const numeric = one.split('/').pop().replace(/\D/g, '');
+      if (numeric) ids = [numeric];
+    }
+
+    // 兼容：批量 ?ids=1,2,3 或 body.ids
+    if (!ids.length) {
+      const raw = (req.query.ids || req.body.ids || '').trim();
+      if (raw) {
+        ids = raw.split(",").map((s) => s.trim()).filter(Boolean);
+      }
+    }
+
+    // 若仍为空：按你原逻辑查询“已下单未推送”
+    if (!ids.length) {
       const data = await shopifyGql(
         `query($q:String!){
           orders(first:50, query:$q){ edges{ node{ id } } }
         }`,
         { q: "tag:'factory:placed' -tag:'factory:pushed' financial_status:paid" }
       );
-      ids = (data?.orders?.edges || []).map((e) =>
-        e.node.id.split("/").pop()
-      );
+      ids = (data?.orders?.edges || []).map((e) => e.node.id.split("/").pop());
     }
+
     if (!ids.length) return res.json({ pushed: 0 });
 
     let pushed = 0;
@@ -263,7 +286,7 @@ app.post("/dev/register-webhooks", express.json(), async (req, res) => {
 });
 
 /* --------------- 调试：只“下单”（不推送） --------------- */
-app.post("/dev/place", express.json(), async (req, res) => {
+app.post("/dev/place", verifyShopifyJWT, express.json(), async (req, res) => {
   try {
     const id = (req.query.id || req.body.id || "").replace(/\D/g, "");
     if (!id) return res.status(400).send("pass ?id=<shopify订单数字ID>");
@@ -302,7 +325,7 @@ function liProp(line, keys) {
 function firstHttp(url) {
   return typeof url === "string" && /^https?:\/\//i.test(url) ? url : "";
 }
-app.get("/dev/order", async (req, res) => {
+app.get("/dev/order", verifyShopifyJWT, async (req, res) => {
   try {
     const id = (req.query.id || "").replace(/\D/g, "");
     if (!id) return res.status(400).json({ error: "pass ?id=<shopify数字订单ID>" });
@@ -344,7 +367,7 @@ app.get("/dev/order", async (req, res) => {
 });
 
 /* ------ 调试：预览映射后的 payload + 缺图行（含示例图） ------ */
-app.get("/dev/inspect", async (req, res) => {
+app.get("/dev/inspect", verifyShopifyJWT, async (req, res) => {
   try {
     const id = (req.query.id || "").replace(/\D/g, "");
     if (!id) return res.status(400).json({ error: "pass ?id=<shopify数字订单ID>" });
