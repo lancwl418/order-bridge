@@ -3,12 +3,6 @@
 const cors = require('cors');
 const { verifyShopifyJWT } = require('./authShopifyJwt');
 
-app.use(cors({
-  origin: [/^https:\/\/.*\.myshopify\.com$/, /^https:\/\/admin\.shopify\.com$/],
-  methods: ['GET','POST','OPTIONS'],
-  allowedHeaders: ['Authorization','Content-Type'],
-}));
-
 require("dotenv").config();
 const express = require("express");
 const { shopifyRest, shopifyGql } = require("./shopify");
@@ -27,7 +21,15 @@ const PORT = Number(process.env.PORT || 3000);
 const AUTO_PUSH =
   (process.env.FACTORY_AUTO_PUSH || "true").toLowerCase() === "true";
 
+
+  app.use(cors({
+    origin: [/^https:\/\/.*\.myshopify\.com$/, /^https:\/\/admin\.shopify\.com$/],
+    methods: ['GET','POST','OPTIONS'],
+    allowedHeaders: ['Authorization','Content-Type'],
+  }));
+
 app.get("/healthz", (req, res) => res.send("ok"));
+
 
 /* -------------- Shopify 标签 / metafield 工具 -------------- */
 async function addTags(orderGid, tags) {
